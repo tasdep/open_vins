@@ -1,0 +1,18 @@
+%YAML:1.0
+
+cam0:
+  # Kalibr result inverted from T_cam_imu. OpenVINS parses T_imu_cam as
+  # rotation from camera to IMU R_CtoI and camera position in IMU p_CinI.
+  T_imu_cam:
+    - [-0.00902258,  0.01804608,  0.99979645,  0.02944678]
+    - [-0.99990773,  0.00999115, -0.00920392, -0.03014340]
+    - [-0.01015521, -0.99978724,  0.01795427, -0.03845542]
+    - [ 0.0,         0.0,         0.0,         1.0]
+  cam_overlaps: []
+  camera_model: pinhole
+  distortion_coeffs: [-0.2465683499006197, 0.03943702001893528, 0.001622022619431492, -0.002320512001241594]
+  distortion_model: radtan
+  intrinsics: [301.1320792357125, 300.4032088676697, 308.80030402287156, 197.946785362486]
+  resolution: [640, 400]
+  rostopic: /camera/image_raw
+  timeshift_cam_imu: 0.0038410107940912595
