@@ -49,6 +49,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include <Eigen/Eigen>
 #include <boost/date_time/posix_time/posix_time.hpp>
@@ -135,6 +136,10 @@ protected:
   /// Publish loop-closure information of current pose and active track information
   void publish_loopclosure_information();
 
+  /// Write a low-overhead CSV diagnostic event for live/replay comparison
+  void record_diagnostic(const std::string &event, double message_timestamp, int sensor_id, size_t queue_size, double processing_time,
+                         double update_dt_ms);
+
   /// Global node handler
   std::shared_ptr<rclcpp::Node> _node;
 
@@ -168,6 +173,18 @@ protected:
   // Optional IMU input throttle for constrained onboard debugging.
   double imu_max_rate_hz = 0.0;
   double last_accepted_imu_time = -1.0;
+
+  // Optional live/replay diagnostic CSV.
+  bool record_diagnostics = false;
+  std::ofstream of_diagnostics;
+  std::mutex diagnostics_mtx;
+  double last_imu_callback_timestamp = -1.0;
+  double last_image_callback_timestamp = -1.0;
+  size_t diagnostic_imu_count = 0;
+  size_t diagnostic_image_count = 0;
+  size_t diagnostic_image_drop_count = 0;
+  size_t diagnostic_update_count = 0;
+  size_t diagnostic_thread_busy_count = 0;
 
   // Groundtruth infomation
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_pathgt;

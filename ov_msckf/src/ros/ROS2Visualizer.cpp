@@ -31,6 +31,8 @@
 #include "utils/print.h"
 #include "utils/sensor_data.h"
 
+#include <iomanip>
+
 using namespace ov_core;
 using namespace ov_type;
 using namespace ov_msckf;
@@ -145,6 +147,27 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
       of_state_gt << "# timestamp(s) q p v bg ba cam_imu_dt num_cam cam0_k cam0_d cam0_rot cam0_trans ... imu_model dw da tg wtoI atoI etc"
                   << std::endl;
     }
+  }
+
+  // Optional CSV diagnostics for comparing live execution against Pi replay.
+  if (!node->has_parameter("record_diagnostics")) {
+    node->declare_parameter<bool>("record_diagnostics", false);
+  }
+  node->get_parameter<bool>("record_diagnostics", record_diagnostics);
+  if (record_diagnostics) {
+    std::string diagnostics_filepath = "/tmp/openvins_diagnostics.csv";
+    if (!node->has_parameter("diagnostics_filepath")) {
+      node->declare_parameter<std::string>("diagnostics_filepath", diagnostics_filepath);
+    }
+    node->get_parameter<std::string>("diagnostics_filepath", diagnostics_filepath);
+    if (boost::filesystem::exists(diagnostics_filepath))
+      boost::filesystem::remove(diagnostics_filepath);
+    boost::filesystem::create_directories(boost::filesystem::path(diagnostics_filepath.c_str()).parent_path());
+    of_diagnostics.open(diagnostics_filepath.c_str());
+    of_diagnostics << "wall_time,event,msg_time,sensor_id,queue_size,processing_time_s,update_dt_ms,initialized,state_time,pose_norm,"
+                      "imu_count,image_count,image_drop_count,update_count,thread_busy_count,imu_dt,image_dt"
+                   << std::endl;
+    PRINT_INFO("recording OpenVINS diagnostics: %s\n", diagnostics_filepath.c_str());
   }
 
   // Start thread for the image publishing
@@ -448,9 +471,22 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
   ov_core::ImuData message;
   message.timestamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
   if (imu_max_rate_hz > 0.0 && last_accepted_imu_time >= 0.0 && message.timestamp - last_accepted_imu_time < 1.0 / imu_max_rate_hz) {
+    size_t queue_size = 0;
+    {
+      std::lock_guard<std::mutex> lck(camera_queue_mtx);
+      queue_size = camera_queue.size();
+    }
+    record_diagnostic("imu_drop_rate", message.timestamp, -1, queue_size, 0.0, 0.0);
     return;
   }
   last_accepted_imu_time = message.timestamp;
+  diagnostic_imu_count++;
+  size_t queue_size = 0;
+  {
+    std::lock_guard<std::mutex> lck(camera_queue_mtx);
+    queue_size = camera_queue.size();
+  }
+  record_diagnostic("imu", message.timestamp, -1, queue_size, 0.0, 0.0);
   message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
   message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
 
@@ -461,8 +497,11 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
   // If the processing queue is currently active / running just return so we can keep getting measurements
   // Otherwise create a second thread to do our update in an async manor
   // The visualization of the state, images, and features will be synchronous with the update!
-  if (thread_update_running)
+  if (thread_update_running) {
+    diagnostic_thread_busy_count++;
+    record_diagnostic("imu_thread_busy", message.timestamp, -1, queue_size, 0.0, 0.0);
     return;
+  }
   thread_update_running = true;
   std::thread thread([&] {
     // Lock on the queue (prevents new images from appending)
@@ -485,12 +524,17 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
       double timestamp_imu_inC = message.timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
       while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
         auto rT0_1 = boost::posix_time::microsec_clock::local_time();
+        double camera_timestamp = camera_queue.at(0).timestamp;
+        int camera_sensor_id = camera_queue.at(0).sensor_ids.at(0);
+        size_t queue_size_before = camera_queue.size();
         double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
         _app->feed_measurement_camera(camera_queue.at(0));
         visualize();
         camera_queue.pop_front();
         auto rT0_2 = boost::posix_time::microsec_clock::local_time();
         double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
+        diagnostic_update_count++;
+        record_diagnostic("camera_update", camera_timestamp, camera_sensor_id, queue_size_before, time_total, update_dt);
         PRINT_INFO(BLUE "[TIME]: %.4f seconds total (%.1f hz, %.2f ms behind)\n" RESET, time_total, 1.0 / time_total, update_dt);
       }
     }
@@ -512,6 +556,13 @@ void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr
   double timestamp = msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9;
   double time_delta = 1.0 / _app->get_params().track_frequency;
   if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
+    diagnostic_image_drop_count++;
+    size_t queue_size = 0;
+    {
+      std::lock_guard<std::mutex> lck(camera_queue_mtx);
+      queue_size = camera_queue.size();
+    }
+    record_diagnostic("image_drop_track_frequency", timestamp, cam_id0, queue_size, 0.0, 0.0);
     return;
   }
   camera_last_timestamp[cam_id0] = timestamp;
@@ -543,6 +594,8 @@ void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr
   std::lock_guard<std::mutex> lck(camera_queue_mtx);
   camera_queue.push_back(message);
   std::sort(camera_queue.begin(), camera_queue.end());
+  diagnostic_image_count++;
+  record_diagnostic("image_enqueue", message.timestamp, cam_id0, camera_queue.size(), 0.0, 0.0);
 }
 
 void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1,
@@ -552,6 +605,13 @@ void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedP
   double timestamp = msg0->header.stamp.sec + msg0->header.stamp.nanosec * 1e-9;
   double time_delta = 1.0 / _app->get_params().track_frequency;
   if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
+    diagnostic_image_drop_count++;
+    size_t queue_size = 0;
+    {
+      std::lock_guard<std::mutex> lck(camera_queue_mtx);
+      queue_size = camera_queue.size();
+    }
+    record_diagnostic("image_drop_track_frequency", timestamp, cam_id0, queue_size, 0.0, 0.0);
     return;
   }
   camera_last_timestamp[cam_id0] = timestamp;
@@ -597,6 +657,41 @@ void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedP
   std::lock_guard<std::mutex> lck(camera_queue_mtx);
   camera_queue.push_back(message);
   std::sort(camera_queue.begin(), camera_queue.end());
+  diagnostic_image_count++;
+  record_diagnostic("image_enqueue", message.timestamp, cam_id0, camera_queue.size(), 0.0, 0.0);
+}
+
+void ROS2Visualizer::record_diagnostic(const std::string &event, double message_timestamp, int sensor_id, size_t queue_size,
+                                       double processing_time, double update_dt_ms) {
+  if (!record_diagnostics || !of_diagnostics.is_open())
+    return;
+
+  std::lock_guard<std::mutex> lck(diagnostics_mtx);
+  const double wall_time = _node->now().seconds();
+  const bool initialized = _app->initialized();
+  double state_time = -1.0;
+  double pose_norm = -1.0;
+  if (_app->get_state() != nullptr) {
+    state_time = _app->get_state()->_timestamp;
+    pose_norm = _app->get_state()->_imu->pos().norm();
+  }
+
+  double imu_dt = -1.0;
+  double image_dt = -1.0;
+  if (event.rfind("imu", 0) == 0) {
+    if (last_imu_callback_timestamp >= 0.0)
+      imu_dt = message_timestamp - last_imu_callback_timestamp;
+    last_imu_callback_timestamp = message_timestamp;
+  } else if (event.rfind("image", 0) == 0 || event == "camera_update") {
+    if (last_image_callback_timestamp >= 0.0)
+      image_dt = message_timestamp - last_image_callback_timestamp;
+    last_image_callback_timestamp = message_timestamp;
+  }
+
+  of_diagnostics << std::fixed << std::setprecision(9) << wall_time << "," << event << "," << message_timestamp << "," << sensor_id << ","
+                 << queue_size << "," << processing_time << "," << update_dt_ms << "," << (initialized ? 1 : 0) << "," << state_time << ","
+                 << pose_norm << "," << diagnostic_imu_count << "," << diagnostic_image_count << "," << diagnostic_image_drop_count << ","
+                 << diagnostic_update_count << "," << diagnostic_thread_busy_count << "," << imu_dt << "," << image_dt << std::endl;
 }
 
 void ROS2Visualizer::publish_state() {
