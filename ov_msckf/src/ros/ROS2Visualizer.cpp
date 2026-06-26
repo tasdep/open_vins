@@ -169,10 +169,17 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
   std::string topic_imu;
   _node->declare_parameter<std::string>("topic_imu", "/imu0");
   _node->get_parameter("topic_imu", topic_imu);
+  if (!_node->has_parameter("imu_max_rate_hz")) {
+    _node->declare_parameter<double>("imu_max_rate_hz", 0.0);
+  }
+  _node->get_parameter("imu_max_rate_hz", imu_max_rate_hz);
   parser->parse_external("relative_config_imu", "imu0", "rostopic", topic_imu);
   sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, rclcpp::SensorDataQoS(),
                                                               std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
   PRINT_INFO("subscribing to IMU: %s\n", topic_imu.c_str());
+  if (imu_max_rate_hz > 0.0) {
+    PRINT_INFO("limiting OpenVINS IMU input to %.1f Hz\n", imu_max_rate_hz);
+  }
 
   // Logic for sync stereo subscriber
   // https://answers.ros.org/question/96346/subscribe-to-two-image_raws-with-one-function/?answer=96491#post-id-96491
@@ -440,6 +447,10 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
   // convert into correct format
   ov_core::ImuData message;
   message.timestamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+  if (imu_max_rate_hz > 0.0 && last_accepted_imu_time >= 0.0 && message.timestamp - last_accepted_imu_time < 1.0 / imu_max_rate_hz) {
+    return;
+  }
+  last_accepted_imu_time = message.timestamp;
   message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
   message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
 

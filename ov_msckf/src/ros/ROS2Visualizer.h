@@ -165,6 +165,10 @@ protected:
   // For path viz
   std::vector<geometry_msgs::msg::PoseStamped> poses_imu;
 
+  // Optional IMU input throttle for constrained onboard debugging.
+  double imu_max_rate_hz = 0.0;
+  double last_accepted_imu_time = -1.0;
+
   // Groundtruth infomation
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_pathgt;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pub_posegt;
