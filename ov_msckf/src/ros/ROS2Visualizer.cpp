@@ -196,10 +196,31 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
     _node->declare_parameter<double>("imu_max_rate_hz", 0.0);
   }
   _node->get_parameter("imu_max_rate_hz", imu_max_rate_hz);
+  if (!_node->has_parameter("imu_qos_depth")) {
+    _node->declare_parameter<int>("imu_qos_depth", 50);
+  }
+  if (!_node->has_parameter("imu_qos_reliable")) {
+    _node->declare_parameter<bool>("imu_qos_reliable", false);
+  }
+  int imu_qos_depth = 50;
+  bool imu_qos_reliable = false;
+  _node->get_parameter("imu_qos_depth", imu_qos_depth);
+  _node->get_parameter("imu_qos_reliable", imu_qos_reliable);
+  if (imu_qos_depth < 1) {
+    PRINT_WARNING("imu_qos_depth must be at least 1, using 1 instead of %d\n", imu_qos_depth);
+    imu_qos_depth = 1;
+  }
   parser->parse_external("relative_config_imu", "imu0", "rostopic", topic_imu);
-  sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, rclcpp::SensorDataQoS(),
-                                                              std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
-  PRINT_INFO("subscribing to IMU: %s\n", topic_imu.c_str());
+  auto imu_qos = rclcpp::QoS(rclcpp::KeepLast(static_cast<size_t>(imu_qos_depth))).durability_volatile();
+  if (imu_qos_reliable) {
+    imu_qos.reliable();
+  } else {
+    imu_qos.best_effort();
+  }
+  sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(
+      topic_imu, imu_qos, std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
+  PRINT_INFO("subscribing to IMU: %s (qos_depth=%d, reliable=%s)\n", topic_imu.c_str(), imu_qos_depth,
+             imu_qos_reliable ? "true" : "false");
   if (imu_max_rate_hz > 0.0) {
     PRINT_INFO("limiting OpenVINS IMU input to %.1f Hz\n", imu_max_rate_hz);
   }
