@@ -82,7 +82,6 @@ int main(int argc, char **argv) {
   // Create our VIO system
   VioManagerOptions params;
   params.print_and_load(parser);
-  params.use_multi_threading_subs = true;
   sys = std::make_shared<VioManager>(params);
 #if ROS_AVAILABLE == 1
   viz = std::make_shared<ROS1Visualizer>(nh, sys);
@@ -106,10 +105,15 @@ int main(int argc, char **argv) {
   spinner.start();
   ros::waitForShutdown();
 #elif ROS_AVAILABLE == 2
-  // rclcpp::spin(node);
-  rclcpp::executors::MultiThreadedExecutor executor;
-  executor.add_node(node);
-  executor.spin();
+  if (params.use_multi_threading_subs) {
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
+  } else {
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
+  }
 #endif
 
   // Final visualization
