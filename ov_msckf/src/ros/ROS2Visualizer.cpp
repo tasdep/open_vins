@@ -31,6 +31,7 @@
 #include "utils/print.h"
 #include "utils/sensor_data.h"
 
+#include <algorithm>
 #include <iomanip>
 
 using namespace ov_core;
@@ -159,6 +160,15 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
     if (!node->has_parameter("diagnostics_filepath")) {
       node->declare_parameter<std::string>("diagnostics_filepath", diagnostics_filepath);
     }
+    if (!node->has_parameter("diagnostics_imu_sample_stride")) {
+      node->declare_parameter<int>("diagnostics_imu_sample_stride", 1);
+    }
+    if (!node->has_parameter("diagnostics_imu_gap_threshold_ms")) {
+      node->declare_parameter<double>("diagnostics_imu_gap_threshold_ms", 10.0);
+    }
+    if (!node->has_parameter("diagnostics_flush_abnormal_events")) {
+      node->declare_parameter<bool>("diagnostics_flush_abnormal_events", true);
+    }
     node->get_parameter<std::string>("diagnostics_filepath", diagnostics_filepath);
     if (!node->has_parameter("diagnostics_feature_sample_stride")) {
       node->declare_parameter<int>("diagnostics_feature_sample_stride", static_cast<int>(diagnostic_feature_sample_stride));
@@ -166,6 +176,13 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
     int feature_sample_stride = static_cast<int>(diagnostic_feature_sample_stride);
     node->get_parameter<int>("diagnostics_feature_sample_stride", feature_sample_stride);
     diagnostic_feature_sample_stride = feature_sample_stride < 1 ? 1 : static_cast<size_t>(feature_sample_stride);
+    int diagnostics_imu_sample_stride_param = 1;
+    double diagnostics_imu_gap_threshold_ms = 10.0;
+    node->get_parameter("diagnostics_imu_sample_stride", diagnostics_imu_sample_stride_param);
+    node->get_parameter("diagnostics_imu_gap_threshold_ms", diagnostics_imu_gap_threshold_ms);
+    node->get_parameter("diagnostics_flush_abnormal_events", diagnostics_flush_abnormal_events);
+    diagnostics_imu_sample_stride = static_cast<size_t>(std::max(1, diagnostics_imu_sample_stride_param));
+    diagnostics_imu_gap_threshold_s = std::max(0.0, diagnostics_imu_gap_threshold_ms) * 1e-3;
     if (boost::filesystem::exists(diagnostics_filepath))
       boost::filesystem::remove(diagnostics_filepath);
     boost::filesystem::create_directories(boost::filesystem::path(diagnostics_filepath.c_str()).parent_path());
@@ -184,6 +201,15 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
                    << std::endl;
     PRINT_INFO("recording OpenVINS diagnostics: %s\n", diagnostics_filepath.c_str());
   }
+
+  if (!node->has_parameter("poseimu_publish_max_rate_hz")) {
+    node->declare_parameter<double>("poseimu_publish_max_rate_hz", 30.0);
+  }
+  if (!node->has_parameter("odomimu_publish_max_rate_hz")) {
+    node->declare_parameter<double>("odomimu_publish_max_rate_hz", 30.0);
+  }
+  node->get_parameter("poseimu_publish_max_rate_hz", poseimu_publish_max_rate_hz);
+  node->get_parameter("odomimu_publish_max_rate_hz", odomimu_publish_max_rate_hz);
 
   // Start thread for the image publishing
   if (_app->get_params().use_multi_threading_pubs) {
@@ -354,6 +380,12 @@ void ROS2Visualizer::visualize_odometry(double timestamp) {
   // Return if we have not inited and a second has passes
   if (!_app->initialized() || (timestamp - _app->initialized_time()) < 1)
     return;
+
+  if (odomimu_publish_max_rate_hz > 0.0 && last_odomimu_publish_timestamp >= 0.0 &&
+      timestamp - last_odomimu_publish_timestamp < 1.0 / odomimu_publish_max_rate_hz) {
+    return;
+  }
+  last_odomimu_publish_timestamp = timestamp;
 
   // Get fast propagate state at the desired timestamp
   std::shared_ptr<State> state = _app->get_state();
@@ -794,14 +826,22 @@ void ROS2Visualizer::record_diagnostic(const std::string &event, double message_
 
   double imu_dt = -1.0;
   double image_dt = -1.0;
+  bool abnormal_event = false;
   if (event.rfind("imu", 0) == 0) {
     if (last_imu_callback_timestamp >= 0.0)
       imu_dt = message_timestamp - last_imu_callback_timestamp;
     last_imu_callback_timestamp = message_timestamp;
+    abnormal_event = imu_dt > diagnostics_imu_gap_threshold_s || event != "imu";
+    if (!abnormal_event && diagnostics_imu_sample_stride > 1 && diagnostic_imu_count % diagnostics_imu_sample_stride != 0) {
+      return;
+    }
   } else if (event.rfind("image", 0) == 0 || event == "camera_update") {
     if (last_image_callback_timestamp >= 0.0)
       image_dt = message_timestamp - last_image_callback_timestamp;
     last_image_callback_timestamp = message_timestamp;
+    abnormal_event = event.find("drop") != std::string::npos || queue_size > 5 || processing_time > 0.040;
+  } else {
+    abnormal_event = event.find("drop") != std::string::npos || event.find("busy") != std::string::npos || queue_size > 5;
   }
 
   of_diagnostics << std::fixed << std::setprecision(9) << wall_time << "," << event << "," << message_timestamp << "," << sensor_id << ","
@@ -819,7 +859,10 @@ void ROS2Visualizer::record_diagnostic(const std::string &event, double message_
                  << snapshot.updater_after_measurement_clean << "," << snapshot.updater_removed_triangulation << ","
                  << snapshot.updater_removed_refinement << "," << snapshot.updater_after_triangulation << ","
                  << snapshot.updater_removed_chi2 << "," << snapshot.updater_accepted_features << "," << snapshot.updater_residual_rows << ","
-                 << snapshot.updater_compressed_rows << "," << snapshot.updater_ekf_update << std::endl;
+                 << snapshot.updater_compressed_rows << "," << snapshot.updater_ekf_update << '\n';
+  if (diagnostics_flush_abnormal_events && abnormal_event) {
+    of_diagnostics.flush();
+  }
 }
 
 void ROS2Visualizer::publish_state() {
@@ -831,6 +874,12 @@ void ROS2Visualizer::publish_state() {
   // The timestamp in the state will be the last camera time
   double t_ItoC = state->_calib_dt_CAMtoIMU->value()(0);
   double timestamp_inI = state->_timestamp + t_ItoC;
+
+  if (poseimu_publish_max_rate_hz > 0.0 && last_poseimu_publish_timestamp >= 0.0 &&
+      timestamp_inI - last_poseimu_publish_timestamp < 1.0 / poseimu_publish_max_rate_hz) {
+    return;
+  }
+  last_poseimu_publish_timestamp = timestamp_inI;
 
   // Create pose of IMU (note we use the bag time)
   geometry_msgs::msg::PoseWithCovarianceStamped poseIinM;

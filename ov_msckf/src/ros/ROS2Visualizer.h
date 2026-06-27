@@ -218,6 +218,9 @@ protected:
   bool record_diagnostics = false;
   std::ofstream of_diagnostics;
   std::mutex diagnostics_mtx;
+  size_t diagnostics_imu_sample_stride = 1;
+  double diagnostics_imu_gap_threshold_s = 0.010;
+  bool diagnostics_flush_abnormal_events = true;
   double last_imu_callback_timestamp = -1.0;
   double last_image_callback_timestamp = -1.0;
   size_t diagnostic_imu_count = 0;
@@ -256,6 +259,10 @@ protected:
   // Last timestamp we visualized at
   double last_visualization_timestamp = 0;
   double last_visualization_timestamp_image = 0;
+  double last_poseimu_publish_timestamp = -1.0;
+  double last_odomimu_publish_timestamp = -1.0;
+  double poseimu_publish_max_rate_hz = 30.0;
+  double odomimu_publish_max_rate_hz = 30.0;
 
   // Our groundtruth states
   std::map<double, Eigen::Matrix<double, 17, 1>> gt_states;
