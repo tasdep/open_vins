@@ -575,39 +575,58 @@ void ROS2Visualizer::process_inertial_measurement(const ov_core::ImuData &messag
   }
   thread_update_running = true;
   std::thread thread([this, message] {
-    // Lock on the queue (prevents new images from appending)
-    std::lock_guard<std::mutex> lck(camera_queue_mtx);
+    std::deque<ov_core::CameraData> ready_camera_queue;
+    std::vector<size_t> queue_sizes_before;
+    auto rT_lock0 = boost::posix_time::microsec_clock::local_time();
 
-    // Count how many unique image streams
-    std::map<int, bool> unique_cam_ids;
-    for (const auto &cam_msg : camera_queue) {
-      unique_cam_ids[cam_msg.sensor_ids.at(0)] = true;
+    {
+      std::lock_guard<std::mutex> lck(camera_queue_mtx);
+
+      // Count how many unique image streams
+      std::map<int, bool> unique_cam_ids;
+      for (const auto &cam_msg : camera_queue) {
+        unique_cam_ids[cam_msg.sensor_ids.at(0)] = true;
+      }
+
+      // If we do not have enough unique cameras then we need to wait
+      // We should wait till we have one of each camera to ensure we propagate in the correct order
+      auto params = _app->get_params();
+      size_t num_unique_cameras = (params.state_options.num_cameras == 2) ? 1 : params.state_options.num_cameras;
+      if (unique_cam_ids.size() == num_unique_cameras) {
+
+        // Move ready camera measurements into a local queue and release the shared
+        // mutex before the expensive visual update. This keeps image processing
+        // from blocking high-rate IMU callbacks that only need brief queue access.
+        double timestamp_imu_inC = message.timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
+        while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
+          queue_sizes_before.push_back(camera_queue.size());
+          ready_camera_queue.push_back(camera_queue.front());
+          camera_queue.pop_front();
+        }
+      }
     }
 
-    // If we do not have enough unique cameras then we need to wait
-    // We should wait till we have one of each camera to ensure we propagate in the correct order
-    auto params = _app->get_params();
-    size_t num_unique_cameras = (params.state_options.num_cameras == 2) ? 1 : params.state_options.num_cameras;
-    if (unique_cam_ids.size() == num_unique_cameras) {
+    auto rT_lock1 = boost::posix_time::microsec_clock::local_time();
+    if (!ready_camera_queue.empty()) {
+      double lock_time = (rT_lock1 - rT_lock0).total_microseconds() * 1e-6;
+      record_diagnostic("camera_queue_batch", ready_camera_queue.front().timestamp, ready_camera_queue.front().sensor_ids.at(0),
+                        ready_camera_queue.size(), lock_time, 0.0);
+    }
 
-      // Loop through our queue and see if we are able to process any of our camera measurements
-      // We are able to process if we have at least one IMU measurement greater than the camera time
+    for (size_t i = 0; i < ready_camera_queue.size(); i++) {
+      auto rT0_1 = boost::posix_time::microsec_clock::local_time();
+      double camera_timestamp = ready_camera_queue.at(i).timestamp;
+      int camera_sensor_id = ready_camera_queue.at(i).sensor_ids.at(0);
+      size_t queue_size_before = queue_sizes_before.at(i);
       double timestamp_imu_inC = message.timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
-      while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
-        auto rT0_1 = boost::posix_time::microsec_clock::local_time();
-        double camera_timestamp = camera_queue.at(0).timestamp;
-        int camera_sensor_id = camera_queue.at(0).sensor_ids.at(0);
-        size_t queue_size_before = camera_queue.size();
-        double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
-        _app->feed_measurement_camera(camera_queue.at(0));
-        visualize();
-        camera_queue.pop_front();
-        auto rT0_2 = boost::posix_time::microsec_clock::local_time();
-        double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
-        diagnostic_update_count++;
-        record_diagnostic("camera_update", camera_timestamp, camera_sensor_id, queue_size_before, time_total, update_dt);
-        PRINT_INFO(BLUE "[TIME]: %.4f seconds total (%.1f hz, %.2f ms behind)\n" RESET, time_total, 1.0 / time_total, update_dt);
-      }
+      double update_dt = 100.0 * (timestamp_imu_inC - ready_camera_queue.at(i).timestamp);
+      _app->feed_measurement_camera(ready_camera_queue.at(i));
+      visualize();
+      auto rT0_2 = boost::posix_time::microsec_clock::local_time();
+      double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
+      diagnostic_update_count++;
+      record_diagnostic("camera_update", camera_timestamp, camera_sensor_id, queue_size_before, time_total, update_dt);
+      PRINT_INFO(BLUE "[TIME]: %.4f seconds total (%.1f hz, %.2f ms behind)\n" RESET, time_total, 1.0 / time_total, update_dt);
     }
     thread_update_running = false;
   });
