@@ -46,19 +46,23 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include <Eigen/Eigen>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/filesystem.hpp>
 #include <cv_bridge/cv_bridge.hpp>
 
+#include "utils/sensor_data.h"
+
 namespace ov_core {
 class YamlParser;
-struct CameraData;
 } // namespace ov_core
 
 namespace ov_msckf {
@@ -86,6 +90,9 @@ public:
    * @param sim Simulator if we are simulating
    */
   ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim = nullptr);
+
+  /// Destructor stops any optional worker threads.
+  ~ROS2Visualizer();
 
   /**
    * @brief Will setup ROS subscribers and callbacks
@@ -140,6 +147,12 @@ protected:
   void record_diagnostic(const std::string &event, double message_timestamp, int sensor_id, size_t queue_size, double processing_time,
                          double update_dt_ms);
 
+  /// Process an already converted IMU measurement.
+  void process_inertial_measurement(const ov_core::ImuData &message);
+
+  /// Optional worker used to decouple high-rate ROS IMU callbacks from estimator processing.
+  void imu_ingest_worker_loop();
+
   /// Global node handler
   std::shared_ptr<rclcpp::Node> _node;
 
@@ -173,6 +186,17 @@ protected:
   // Optional IMU input throttle for constrained onboard debugging.
   double imu_max_rate_hz = 0.0;
   double last_accepted_imu_time = -1.0;
+  bool use_imu_ingest_thread = false;
+
+  struct QueuedImuData {
+    ov_core::ImuData message;
+    double enqueue_wall_time = 0.0;
+  };
+  std::deque<QueuedImuData> imu_ingest_queue;
+  std::mutex imu_ingest_mtx;
+  std::condition_variable imu_ingest_cv;
+  std::thread imu_ingest_thread;
+  std::atomic<bool> imu_ingest_stop{false};
 
   // Optional live/replay diagnostic CSV.
   bool record_diagnostics = false;

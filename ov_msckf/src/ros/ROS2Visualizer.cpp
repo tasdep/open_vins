@@ -183,6 +183,14 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
   }
 }
 
+ROS2Visualizer::~ROS2Visualizer() {
+  imu_ingest_stop = true;
+  imu_ingest_cv.notify_all();
+  if (imu_ingest_thread.joinable()) {
+    imu_ingest_thread.join();
+  }
+}
+
 void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> parser) {
 
   // We need a valid parser
@@ -202,10 +210,14 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
   if (!_node->has_parameter("imu_qos_reliable")) {
     _node->declare_parameter<bool>("imu_qos_reliable", false);
   }
+  if (!_node->has_parameter("use_imu_ingest_thread")) {
+    _node->declare_parameter<bool>("use_imu_ingest_thread", false);
+  }
   int imu_qos_depth = 50;
   bool imu_qos_reliable = false;
   _node->get_parameter("imu_qos_depth", imu_qos_depth);
   _node->get_parameter("imu_qos_reliable", imu_qos_reliable);
+  _node->get_parameter("use_imu_ingest_thread", use_imu_ingest_thread);
   if (imu_qos_depth < 1) {
     PRINT_WARNING("imu_qos_depth must be at least 1, using 1 instead of %d\n", imu_qos_depth);
     imu_qos_depth = 1;
@@ -221,6 +233,11 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
       topic_imu, imu_qos, std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
   PRINT_INFO("subscribing to IMU: %s (qos_depth=%d, reliable=%s)\n", topic_imu.c_str(), imu_qos_depth,
              imu_qos_reliable ? "true" : "false");
+  if (use_imu_ingest_thread) {
+    imu_ingest_stop = false;
+    imu_ingest_thread = std::thread(&ROS2Visualizer::imu_ingest_worker_loop, this);
+    PRINT_INFO("using dedicated OpenVINS IMU ingest worker\n");
+  }
   if (imu_max_rate_hz > 0.0) {
     PRINT_INFO("limiting OpenVINS IMU input to %.1f Hz\n", imu_max_rate_hz);
   }
@@ -502,14 +519,32 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
   }
   last_accepted_imu_time = message.timestamp;
   diagnostic_imu_count++;
+  message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
+  message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
+
+  if (use_imu_ingest_thread) {
+    size_t ingest_queue_size = 0;
+    {
+      std::lock_guard<std::mutex> lck(imu_ingest_mtx);
+      imu_ingest_queue.push_back({message, _node->now().seconds()});
+      ingest_queue_size = imu_ingest_queue.size();
+    }
+    imu_ingest_cv.notify_one();
+    record_diagnostic("ingest_enqueue", message.timestamp, -1, ingest_queue_size, 0.0, 0.0);
+    return;
+  }
+
+  process_inertial_measurement(message);
+}
+
+void ROS2Visualizer::process_inertial_measurement(const ov_core::ImuData &message) {
+
   size_t queue_size = 0;
   {
     std::lock_guard<std::mutex> lck(camera_queue_mtx);
     queue_size = camera_queue.size();
   }
   record_diagnostic("imu", message.timestamp, -1, queue_size, 0.0, 0.0);
-  message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
-  message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
 
   // send it to our VIO system
   _app->feed_measurement_imu(message);
@@ -524,7 +559,7 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
     return;
   }
   thread_update_running = true;
-  std::thread thread([&] {
+  std::thread thread([this, message] {
     // Lock on the queue (prevents new images from appending)
     std::lock_guard<std::mutex> lck(camera_queue_mtx);
 
@@ -568,6 +603,27 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
     thread.join();
   } else {
     thread.detach();
+  }
+}
+
+void ROS2Visualizer::imu_ingest_worker_loop() {
+  while (rclcpp::ok()) {
+    QueuedImuData queued_message;
+    size_t queue_size_after_pop = 0;
+    {
+      std::unique_lock<std::mutex> lck(imu_ingest_mtx);
+      imu_ingest_cv.wait(lck, [this] { return imu_ingest_stop || !imu_ingest_queue.empty(); });
+      if (imu_ingest_stop && imu_ingest_queue.empty()) {
+        break;
+      }
+      queued_message = imu_ingest_queue.front();
+      imu_ingest_queue.pop_front();
+      queue_size_after_pop = imu_ingest_queue.size();
+    }
+
+    double ingest_latency = _node->now().seconds() - queued_message.enqueue_wall_time;
+    record_diagnostic("ingest_worker", queued_message.message.timestamp, -1, queue_size_after_pop, ingest_latency, 0.0);
+    process_inertial_measurement(queued_message.message);
   }
 }
 
