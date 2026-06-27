@@ -210,6 +210,21 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
   }
   node->get_parameter("poseimu_publish_max_rate_hz", poseimu_publish_max_rate_hz);
   node->get_parameter("odomimu_publish_max_rate_hz", odomimu_publish_max_rate_hz);
+  if (!node->has_parameter("max_camera_queue_size")) {
+    node->declare_parameter<int>("max_camera_queue_size", 0);
+  }
+  if (!node->has_parameter("slow_camera_update_warn_ms")) {
+    node->declare_parameter<double>("slow_camera_update_warn_ms", 40.0);
+  }
+  int max_camera_queue_size_param = 0;
+  double slow_camera_update_warn_ms = 40.0;
+  node->get_parameter("max_camera_queue_size", max_camera_queue_size_param);
+  node->get_parameter("slow_camera_update_warn_ms", slow_camera_update_warn_ms);
+  max_camera_queue_size = static_cast<size_t>(std::max(0, max_camera_queue_size_param));
+  slow_camera_update_warn_s = std::max(0.0, slow_camera_update_warn_ms) * 1e-3;
+  if (max_camera_queue_size > 0) {
+    PRINT_INFO("limiting OpenVINS camera queue to %zu frames\n", max_camera_queue_size);
+  }
 
   // Start thread for the image publishing
   if (_app->get_params().use_multi_threading_pubs) {
@@ -658,6 +673,10 @@ void ROS2Visualizer::process_inertial_measurement(const ov_core::ImuData &messag
       double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
       diagnostic_update_count++;
       record_diagnostic("camera_update", camera_timestamp, camera_sensor_id, queue_size_before, time_total, update_dt);
+      if (slow_camera_update_warn_s > 0.0 && time_total > slow_camera_update_warn_s) {
+        record_diagnostic("camera_update_slow", camera_timestamp, camera_sensor_id, ready_camera_queue.size() - i - 1, time_total,
+                          update_dt);
+      }
       PRINT_INFO(BLUE "[TIME]: %.4f seconds total (%.1f hz, %.2f ms behind)\n" RESET, time_total, 1.0 / time_total, update_dt);
     }
     thread_update_running = false;
@@ -690,6 +709,19 @@ void ROS2Visualizer::imu_ingest_worker_loop() {
     double ingest_latency = _node->now().seconds() - queued_message.enqueue_wall_time;
     record_diagnostic("ingest_worker", queued_message.message.timestamp, -1, queue_size_after_pop, ingest_latency, 0.0);
     process_inertial_measurement(queued_message.message);
+  }
+}
+
+void ROS2Visualizer::trim_camera_queue_locked() {
+  if (max_camera_queue_size == 0) {
+    return;
+  }
+  while (camera_queue.size() > max_camera_queue_size) {
+    const double dropped_timestamp = camera_queue.front().timestamp;
+    const int dropped_sensor_id = camera_queue.front().sensor_ids.empty() ? -1 : camera_queue.front().sensor_ids.at(0);
+    camera_queue.pop_front();
+    diagnostic_image_drop_count++;
+    record_diagnostic("image_drop_queue_limit", dropped_timestamp, dropped_sensor_id, camera_queue.size(), 0.0, 0.0);
   }
 }
 
@@ -737,6 +769,7 @@ void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr
   std::lock_guard<std::mutex> lck(camera_queue_mtx);
   camera_queue.push_back(message);
   std::sort(camera_queue.begin(), camera_queue.end());
+  trim_camera_queue_locked();
   diagnostic_image_count++;
   record_diagnostic("image_enqueue", message.timestamp, cam_id0, camera_queue.size(), 0.0, 0.0);
 }
@@ -800,6 +833,7 @@ void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedP
   std::lock_guard<std::mutex> lck(camera_queue_mtx);
   camera_queue.push_back(message);
   std::sort(camera_queue.begin(), camera_queue.end());
+  trim_camera_queue_locked();
   diagnostic_image_count++;
   record_diagnostic("image_enqueue", message.timestamp, cam_id0, camera_queue.size(), 0.0, 0.0);
 }

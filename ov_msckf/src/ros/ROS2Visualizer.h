@@ -169,6 +169,9 @@ protected:
   /// Optional worker used to decouple high-rate ROS IMU callbacks from estimator processing.
   void imu_ingest_worker_loop();
 
+  /// Drop oldest queued camera frames if the queue grows beyond the configured onboard limit.
+  void trim_camera_queue_locked();
+
   /// Global node handler
   std::shared_ptr<rclcpp::Node> _node;
 
@@ -213,6 +216,8 @@ protected:
   std::condition_variable imu_ingest_cv;
   std::thread imu_ingest_thread;
   std::atomic<bool> imu_ingest_stop{false};
+  size_t max_camera_queue_size = 0;
+  double slow_camera_update_warn_s = 0.040;
 
   // Optional live/replay diagnostic CSV.
   bool record_diagnostics = false;
