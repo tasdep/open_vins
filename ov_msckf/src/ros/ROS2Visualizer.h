@@ -209,6 +209,7 @@ protected:
   size_t diagnostic_image_drop_count = 0;
   size_t diagnostic_update_count = 0;
   size_t diagnostic_thread_busy_count = 0;
+  size_t diagnostic_feature_sample_stride = 5;
 
   // Groundtruth infomation
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_pathgt;

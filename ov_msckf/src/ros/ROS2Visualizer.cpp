@@ -160,12 +160,27 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
       node->declare_parameter<std::string>("diagnostics_filepath", diagnostics_filepath);
     }
     node->get_parameter<std::string>("diagnostics_filepath", diagnostics_filepath);
+    if (!node->has_parameter("diagnostics_feature_sample_stride")) {
+      node->declare_parameter<int>("diagnostics_feature_sample_stride", static_cast<int>(diagnostic_feature_sample_stride));
+    }
+    int feature_sample_stride = static_cast<int>(diagnostic_feature_sample_stride);
+    node->get_parameter<int>("diagnostics_feature_sample_stride", feature_sample_stride);
+    diagnostic_feature_sample_stride = feature_sample_stride < 1 ? 1 : static_cast<size_t>(feature_sample_stride);
     if (boost::filesystem::exists(diagnostics_filepath))
       boost::filesystem::remove(diagnostics_filepath);
     boost::filesystem::create_directories(boost::filesystem::path(diagnostics_filepath.c_str()).parent_path());
     of_diagnostics.open(diagnostics_filepath.c_str());
     of_diagnostics << "wall_time,event,msg_time,sensor_id,queue_size,processing_time_s,update_dt_ms,initialized,state_time,pose_norm,"
-                      "imu_count,image_count,image_drop_count,update_count,thread_busy_count,imu_dt,image_dt"
+                      "imu_count,image_count,image_drop_count,update_count,thread_busy_count,imu_dt,image_dt,"
+                      "active_track_count,active_track_position_count,tracker_database_size,msckf_update_feature_count,"
+                      "slam_state_feature_count,clone_count,target_track_count,feature_disparity_mean,feature_disparity_var,"
+                      "feature_disparity_count,feats_lost_count,feats_marg_count,feats_maxtracks_count,"
+                      "feats_slam_delayed_count,feats_slam_update_count,msckf_candidates_before_cap,"
+                      "msckf_candidates_after_cap,msckf_candidate_track_len_p50,msckf_candidate_track_len_max,"
+                      "updater_input_features,updater_removed_insufficient_measurements,updater_after_measurement_clean,"
+                      "updater_removed_triangulation,updater_removed_refinement,updater_after_triangulation,"
+                      "updater_removed_chi2,updater_accepted_features,updater_residual_rows,updater_compressed_rows,"
+                      "updater_ekf_update"
                    << std::endl;
     PRINT_INFO("recording OpenVINS diagnostics: %s\n", diagnostics_filepath.c_str());
   }
@@ -752,6 +767,11 @@ void ROS2Visualizer::record_diagnostic(const std::string &event, double message_
     state_time = _app->get_state()->_timestamp;
     pose_norm = _app->get_state()->_imu->pos().norm();
   }
+  VioManager::DiagnosticsSnapshot snapshot;
+  if (event == "camera_update" && diagnostic_feature_sample_stride > 0 &&
+      diagnostic_update_count % diagnostic_feature_sample_stride == 0) {
+    snapshot = _app->get_diagnostics_snapshot();
+  }
 
   double imu_dt = -1.0;
   double image_dt = -1.0;
@@ -768,7 +788,19 @@ void ROS2Visualizer::record_diagnostic(const std::string &event, double message_
   of_diagnostics << std::fixed << std::setprecision(9) << wall_time << "," << event << "," << message_timestamp << "," << sensor_id << ","
                  << queue_size << "," << processing_time << "," << update_dt_ms << "," << (initialized ? 1 : 0) << "," << state_time << ","
                  << pose_norm << "," << diagnostic_imu_count << "," << diagnostic_image_count << "," << diagnostic_image_drop_count << ","
-                 << diagnostic_update_count << "," << diagnostic_thread_busy_count << "," << imu_dt << "," << image_dt << std::endl;
+                 << diagnostic_update_count << "," << diagnostic_thread_busy_count << "," << imu_dt << "," << image_dt << ","
+                 << snapshot.active_track_count << "," << snapshot.active_track_position_count << "," << snapshot.tracker_database_size << ","
+                 << snapshot.msckf_update_feature_count << "," << snapshot.slam_state_feature_count << "," << snapshot.clone_count << ","
+                 << snapshot.target_track_count << "," << snapshot.feature_disparity_mean << "," << snapshot.feature_disparity_var << ","
+                 << snapshot.feature_disparity_count << "," << snapshot.feats_lost_count << "," << snapshot.feats_marg_count << ","
+                 << snapshot.feats_maxtracks_count << "," << snapshot.feats_slam_delayed_count << "," << snapshot.feats_slam_update_count << ","
+                 << snapshot.msckf_candidates_before_cap << "," << snapshot.msckf_candidates_after_cap << ","
+                 << snapshot.msckf_candidate_track_len_p50 << "," << snapshot.msckf_candidate_track_len_max << ","
+                 << snapshot.updater_input_features << "," << snapshot.updater_removed_insufficient_measurements << ","
+                 << snapshot.updater_after_measurement_clean << "," << snapshot.updater_removed_triangulation << ","
+                 << snapshot.updater_removed_refinement << "," << snapshot.updater_after_triangulation << ","
+                 << snapshot.updater_removed_chi2 << "," << snapshot.updater_accepted_features << "," << snapshot.updater_residual_rows << ","
+                 << snapshot.updater_compressed_rows << "," << snapshot.updater_ekf_update << std::endl;
 }
 
 void ROS2Visualizer::publish_state() {

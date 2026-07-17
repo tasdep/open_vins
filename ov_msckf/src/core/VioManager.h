@@ -62,6 +62,39 @@ class Propagator;
 class VioManager {
 
 public:
+  struct DiagnosticsSnapshot {
+    int active_track_count = -1;
+    int active_track_position_count = -1;
+    int tracker_database_size = -1;
+    int msckf_update_feature_count = -1;
+    int slam_state_feature_count = -1;
+    int clone_count = -1;
+    int target_track_count = -1;
+    double feature_disparity_mean = -1.0;
+    double feature_disparity_var = -1.0;
+    int feature_disparity_count = 0;
+    int feats_lost_count = -1;
+    int feats_marg_count = -1;
+    int feats_maxtracks_count = -1;
+    int feats_slam_delayed_count = -1;
+    int feats_slam_update_count = -1;
+    int msckf_candidates_before_cap = -1;
+    int msckf_candidates_after_cap = -1;
+    int msckf_candidate_track_len_p50 = -1;
+    int msckf_candidate_track_len_max = -1;
+    int updater_input_features = -1;
+    int updater_removed_insufficient_measurements = -1;
+    int updater_after_measurement_clean = -1;
+    int updater_removed_triangulation = -1;
+    int updater_removed_refinement = -1;
+    int updater_after_triangulation = -1;
+    int updater_removed_chi2 = -1;
+    int updater_accepted_features = -1;
+    int updater_residual_rows = -1;
+    int updater_compressed_rows = -1;
+    int updater_ekf_update = -1;
+  };
+
   /**
    * @brief Default constructor, will load all configuration variables
    * @param params_ Parameters loaded from either ROS or CMDLINE
@@ -109,6 +142,9 @@ public:
 
   /// Accessor to get the current propagator
   std::shared_ptr<Propagator> get_propagator() { return propagator; }
+
+  /// Snapshot of frontend/update counts for runtime diagnostics
+  DiagnosticsSnapshot get_diagnostics_snapshot();
 
   /// Get a nice visualization image of what tracks we have
   cv::Mat get_historical_viz_image();
@@ -228,6 +264,17 @@ protected:
   // If we did a zero velocity update
   bool did_zupt_update = false;
   bool has_moved_since_zupt = false;
+
+  // Last feature update diagnostics.
+  int diagnostic_feats_lost_count = -1;
+  int diagnostic_feats_marg_count = -1;
+  int diagnostic_feats_maxtracks_count = -1;
+  int diagnostic_feats_slam_delayed_count = -1;
+  int diagnostic_feats_slam_update_count = -1;
+  int diagnostic_msckf_candidates_before_cap = -1;
+  int diagnostic_msckf_candidates_after_cap = -1;
+  int diagnostic_msckf_candidate_track_len_p50 = -1;
+  int diagnostic_msckf_candidate_track_len_max = -1;
 
   // Good features that where used in the last update (used in visualization)
   std::vector<Eigen::Vector3d> good_features_MSCKF;

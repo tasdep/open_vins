@@ -23,6 +23,7 @@
 
 #include "feat/Feature.h"
 #include "feat/FeatureDatabase.h"
+#include "feat/FeatureHelper.h"
 #include "feat/FeatureInitializer.h"
 #include "track/TrackAruco.h"
 #include "track/TrackDescriptor.h"
@@ -186,6 +187,52 @@ void VioManager::feed_measurement_imu(const ov_core::ImuData &message) {
   if (is_initialized_vio && updaterZUPT != nullptr && (!params.zupt_only_at_beginning || !has_moved_since_zupt)) {
     updaterZUPT->feed_imu(message, oldest_time);
   }
+}
+
+VioManager::DiagnosticsSnapshot VioManager::get_diagnostics_snapshot() {
+  DiagnosticsSnapshot snapshot;
+  if (state != nullptr) {
+    snapshot.slam_state_feature_count = state->_features_SLAM.size();
+    snapshot.clone_count = state->_clones_IMU.size();
+  }
+  if (trackFEATS != nullptr) {
+    snapshot.target_track_count = trackFEATS->get_num_features();
+    auto last_ids = trackFEATS->get_last_ids();
+    for (const auto &cam_ids : last_ids) {
+      snapshot.active_track_count += cam_ids.second.size();
+    }
+    if (trackFEATS->get_feature_database() != nullptr) {
+      snapshot.tracker_database_size = trackFEATS->get_feature_database()->size();
+      FeatureHelper::compute_disparity(trackFEATS->get_feature_database(), snapshot.feature_disparity_mean,
+                                       snapshot.feature_disparity_var, snapshot.feature_disparity_count);
+    }
+  }
+  snapshot.active_track_position_count = active_tracks_uvd.size();
+  snapshot.msckf_update_feature_count = good_features_MSCKF.size();
+  snapshot.feats_lost_count = diagnostic_feats_lost_count;
+  snapshot.feats_marg_count = diagnostic_feats_marg_count;
+  snapshot.feats_maxtracks_count = diagnostic_feats_maxtracks_count;
+  snapshot.feats_slam_delayed_count = diagnostic_feats_slam_delayed_count;
+  snapshot.feats_slam_update_count = diagnostic_feats_slam_update_count;
+  snapshot.msckf_candidates_before_cap = diagnostic_msckf_candidates_before_cap;
+  snapshot.msckf_candidates_after_cap = diagnostic_msckf_candidates_after_cap;
+  snapshot.msckf_candidate_track_len_p50 = diagnostic_msckf_candidate_track_len_p50;
+  snapshot.msckf_candidate_track_len_max = diagnostic_msckf_candidate_track_len_max;
+  if (updaterMSCKF != nullptr) {
+    auto stats = updaterMSCKF->get_last_update_stats();
+    snapshot.updater_input_features = stats.input_features;
+    snapshot.updater_removed_insufficient_measurements = stats.removed_insufficient_measurements;
+    snapshot.updater_after_measurement_clean = stats.after_measurement_clean;
+    snapshot.updater_removed_triangulation = stats.removed_triangulation;
+    snapshot.updater_removed_refinement = stats.removed_refinement;
+    snapshot.updater_after_triangulation = stats.after_triangulation;
+    snapshot.updater_removed_chi2 = stats.removed_chi2;
+    snapshot.updater_accepted_features = stats.accepted_features;
+    snapshot.updater_residual_rows = stats.residual_rows;
+    snapshot.updater_compressed_rows = stats.compressed_rows;
+    snapshot.updater_ekf_update = stats.ekf_update ? 1 : 0;
+  }
+  return snapshot;
 }
 
 void VioManager::feed_measurement_simulation(double timestamp, const std::vector<int> &camids,
@@ -498,6 +545,28 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
   std::vector<std::shared_ptr<Feature>> featsup_MSCKF = feats_lost;
   featsup_MSCKF.insert(featsup_MSCKF.end(), feats_marg.begin(), feats_marg.end());
   featsup_MSCKF.insert(featsup_MSCKF.end(), feats_maxtracks.begin(), feats_maxtracks.end());
+  diagnostic_feats_lost_count = (int)feats_lost.size();
+  diagnostic_feats_marg_count = (int)feats_marg.size();
+  diagnostic_feats_maxtracks_count = (int)feats_maxtracks.size();
+  diagnostic_feats_slam_delayed_count = (int)feats_slam_DELAYED.size();
+  diagnostic_feats_slam_update_count = (int)feats_slam_UPDATE.size();
+  diagnostic_msckf_candidates_before_cap = (int)featsup_MSCKF.size();
+  diagnostic_msckf_candidate_track_len_p50 = -1;
+  diagnostic_msckf_candidate_track_len_max = -1;
+  std::vector<int> diagnostic_track_lengths;
+  diagnostic_track_lengths.reserve(featsup_MSCKF.size());
+  for (const auto &feat : featsup_MSCKF) {
+    int track_length = 0;
+    for (const auto &pair : feat->timestamps) {
+      track_length += (int)pair.second.size();
+    }
+    diagnostic_track_lengths.push_back(track_length);
+  }
+  if (!diagnostic_track_lengths.empty()) {
+    std::sort(diagnostic_track_lengths.begin(), diagnostic_track_lengths.end());
+    diagnostic_msckf_candidate_track_len_p50 = diagnostic_track_lengths.at(diagnostic_track_lengths.size() / 2);
+    diagnostic_msckf_candidate_track_len_max = diagnostic_track_lengths.back();
+  }
 
   //===================================================================================
   // Now that we have a list of features, lets do the EKF update for MSCKF and SLAM!
@@ -522,6 +591,7 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
   // NOTE: this should only really be used if you want to track a lot of features, or have limited computational resources
   if ((int)featsup_MSCKF.size() > state->_options.max_msckf_in_update)
     featsup_MSCKF.erase(featsup_MSCKF.begin(), featsup_MSCKF.end() - state->_options.max_msckf_in_update);
+  diagnostic_msckf_candidates_after_cap = (int)featsup_MSCKF.size();
   updaterMSCKF->update(state, featsup_MSCKF);
   propagator->invalidate_cache();
   rT4 = boost::posix_time::microsec_clock::local_time();

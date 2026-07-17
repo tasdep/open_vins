@@ -48,6 +48,20 @@ class State;
 class UpdaterMSCKF {
 
 public:
+  struct UpdateStats {
+    int input_features = 0;
+    int removed_insufficient_measurements = 0;
+    int after_measurement_clean = 0;
+    int removed_triangulation = 0;
+    int removed_refinement = 0;
+    int after_triangulation = 0;
+    int removed_chi2 = 0;
+    int accepted_features = 0;
+    int residual_rows = 0;
+    int compressed_rows = 0;
+    bool ekf_update = false;
+  };
+
   /**
    * @brief Default constructor for our MSCKF updater
    *
@@ -67,6 +81,9 @@ public:
    */
   void update(std::shared_ptr<State> state, std::vector<std::shared_ptr<ov_core::Feature>> &feature_vec);
 
+  /// Statistics from the most recent update call.
+  UpdateStats get_last_update_stats() const { return last_update_stats; }
+
 protected:
   /// Options used during update
   UpdaterOptions _options;
@@ -76,6 +93,9 @@ protected:
 
   /// Chi squared 95th percentile table (lookup would be size of residual)
   std::map<int, double> chi_squared_table;
+
+  /// Statistics from the most recent update call.
+  UpdateStats last_update_stats;
 };
 
 } // namespace ov_msckf

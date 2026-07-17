@@ -57,6 +57,9 @@ UpdaterMSCKF::UpdaterMSCKF(UpdaterOptions &options, ov_core::FeatureInitializerO
 
 void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_ptr<Feature>> &feature_vec) {
 
+  last_update_stats = UpdateStats();
+  last_update_stats.input_features = (int)feature_vec.size();
+
   // Return if no features
   if (feature_vec.empty())
     return;
@@ -88,10 +91,12 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
     if (ct_meas < 2) {
       (*it0)->to_delete = true;
       it0 = feature_vec.erase(it0);
+      last_update_stats.removed_insufficient_measurements++;
     } else {
       it0++;
     }
   }
+  last_update_stats.after_measurement_clean = (int)feature_vec.size();
   rT1 = boost::posix_time::microsec_clock::local_time();
 
   // 2. Create vector of cloned *CAMERA* poses at each of our clone timesteps
@@ -136,10 +141,16 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
     if (!success_tri || !success_refine) {
       (*it1)->to_delete = true;
       it1 = feature_vec.erase(it1);
+      if (!success_tri) {
+        last_update_stats.removed_triangulation++;
+      } else {
+        last_update_stats.removed_refinement++;
+      }
       continue;
     }
     it1++;
   }
+  last_update_stats.after_triangulation = (int)feature_vec.size();
   rT2 = boost::posix_time::microsec_clock::local_time();
 
   // Calculate the max possible measurement size
@@ -225,6 +236,7 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
     if (chi2 > _options.chi2_multipler * chi2_check) {
       (*it2)->to_delete = true;
       it2 = feature_vec.erase(it2);
+      last_update_stats.removed_chi2++;
       // PRINT_DEBUG("featid = %d\n", feat.featid);
       // PRINT_DEBUG("chi2 = %f > %f\n", chi2, _options.chi2_multipler*chi2_check);
       // std::stringstream ss;
@@ -254,6 +266,8 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
     ct_meas += res.rows();
     it2++;
   }
+  last_update_stats.accepted_features = (int)feature_vec.size();
+  last_update_stats.residual_rows = (int)ct_meas;
   rT3 = boost::posix_time::microsec_clock::local_time();
 
   // We have appended all features to our Hx_big, res_big
@@ -273,6 +287,7 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
 
   // 5. Perform measurement compression
   UpdaterHelper::measurement_compress_inplace(Hx_big, res_big);
+  last_update_stats.compressed_rows = (int)Hx_big.rows();
   if (Hx_big.rows() < 1) {
     return;
   }
@@ -283,6 +298,7 @@ void UpdaterMSCKF::update(std::shared_ptr<State> state, std::vector<std::shared_
 
   // 6. With all good features update the state
   StateHelper::EKFUpdate(state, Hx_order_big, Hx_big, res_big, R_big);
+  last_update_stats.ekf_update = true;
   rT5 = boost::posix_time::microsec_clock::local_time();
 
   // Debug print timing information
