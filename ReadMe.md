@@ -4,6 +4,13 @@
 [![ROS 2 Workflow](https://github.com/rpng/open_vins/actions/workflows/build_ros2.yml/badge.svg)](https://github.com/rpng/open_vins/actions/workflows/build_ros2.yml)
 [![ROS Free Workflow](https://github.com/rpng/open_vins/actions/workflows/build.yml/badge.svg)](https://github.com/rpng/open_vins/actions/workflows/build.yml)
 
+## Prototype UAV Branch
+
+The `thesis/onboard-vio` branch consolidates the ROS 2 Jazzy compatibility,
+OV9281 configuration, onboard IMU ingest, callback locking, diagnostics,
+publish-rate limiting, and low-load profile developed for the prototype UAV.
+The original OpenVINS project and authorship remain acknowledged below.
+
 Welcome to the OpenVINS project!
 The OpenVINS project houses some core computer vision code along with a state-of-the art filter-based visual-inertial
 estimator. The core filter is an [Extended Kalman filter](https://en.wikipedia.org/wiki/Extended_Kalman_filter) which
@@ -181,5 +188,4 @@ following:
 
 The codebase and documentation is licensed under the [GNU General Public License v3 (GPL-3)](https://www.gnu.org/licenses/gpl-3.0.txt).
 You must preserve the copyright and license notices in your derivative work and make available the complete source code with modifications under the same license ([see this](https://choosealicense.com/licenses/gpl-3.0/); this is not legal advice).
-
 
